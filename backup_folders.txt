@@ -1,0 +1,10 @@
+
+# Top-level folders considered backed up
+appdata
+backup
+books
+documents
+music
+nextcloud
+pictures
+sports
