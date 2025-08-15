@@ -141,13 +141,16 @@ def main() -> None:
     match = folder_matcher(args.folder)
 
     stem, _ = os.path.splitext(os.path.basename(args.input_file))
-    confirmed_path = f"{stem}.backup_confirmed.txt"
-    missing_path   = f"{stem}.backup_missing.txt"
+    
+    # Ensure output directory exists
+    os.makedirs("out", exist_ok=True)
+    confirmed_path = f"out/{stem}.backup_confirmed.txt"
+    missing_path   = f"out/{stem}.backup_missing.txt"
 
     # Restore logs (only opened if restore_path provided)
-    restored_ok_path      = f"{stem}.restored_ok.txt"
-    restored_skipped_path = f"{stem}.restored_skipped.txt"
-    restored_err_path     = f"{stem}.restored_errors.txt"
+    restored_ok_path      = f"out/{stem}.restored_ok.txt"
+    restored_skipped_path = f"out/{stem}.restored_skipped.txt"
+    restored_err_path     = f"out/{stem}.restored_errors.txt"
 
     total = blanks = filtered = confirmed = missing = 0
     r_ok = r_skip = r_err = 0

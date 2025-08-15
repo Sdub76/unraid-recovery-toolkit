@@ -248,12 +248,16 @@ def main():
 
     # Setup file paths
     ymd = args.date.replace("-", "")
+    
+    # Ensure output directory exists
+    os.makedirs("out", exist_ok=True)
+    
     if args.out:
-        missing_path = f"{args.out}_missing.txt"
-        restored_path = f"{args.out}_restored.txt"
+        missing_path = f"out/{args.out}_missing.txt"
+        restored_path = f"out/{args.out}_restored.txt"
     else:
-        missing_path = f"radarr_{ymd}_missing.txt"
-        restored_path = f"radarr_{ymd}_restored.txt"
+        missing_path = f"out/radarr_{ymd}_missing.txt"
+        restored_path = f"out/radarr_{ymd}_restored.txt"
 
     session = make_session(args.radarr_url, args.api_key)
     start_utc, end_utc = local_window_to_utc(args.date, args.tz_offset)

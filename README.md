@@ -26,6 +26,8 @@ This toolkit currently includes these scripts:
 - **sonarr_deleted.py** — export Sonarr-deleted items for a date range; with `--redownload` re-request only **missing** episodes.
 - **radarr_deleted.py** — export Radarr-deleted items for a date range; with `--redownload` re-request only **missing** movies.
 
+> **Note**: All output files are automatically created in the `out/` subdirectory to keep the repository clean. The `.gitignore` file excludes all generated content.
+
 ## Setup
 
 ### 0) Create & activate a Python virtual environment (venv)
@@ -133,12 +135,12 @@ python recovery_analysis.py --levels 4 --folder tv/Library/Ken filelist.disk8.tx
 
 Scans each path in your file list and determines whether it already exists under a given base path, is covered by your **backup set**, is listed in your **Sonarr/Radarr deleted exports** (so can be redownloaded), or is truly **missing**.
 
-**Outputs** (written to the current directory; `<input_stem>` is the input filename without extension):
+**Outputs** (written to the `out/` directory; `<input_stem>` is the input filename without extension):
 
-- `<input_stem>.found.txt`       — files already present at `--base-path`
-- `<input_stem>.backup.txt`      — not found on disk but within your backed-up top-levels
-- `<input_stem>.redownload.txt`  — not found, not in backup, but present in Sonarr/Radarr deleted lists
-- `<input_stem>.missing.txt`     — neither found, backed up, nor in deleted lists
+- `out/<input_stem>.found.txt`       — files already present at `--base-path`
+- `out/<input_stem>.backup.txt`      — not found on disk but within your backed-up top-levels
+- `out/<input_stem>.redownload.txt`  — not found, not in backup, but present in Sonarr/Radarr deleted lists
+- `out/<input_stem>.missing.txt`     — neither found, backed up, nor in deleted lists
 
 **Usage**
 
@@ -152,8 +154,8 @@ python recovery_plan.py --base-path /mnt/user --folder tv/Library/Ken filelist.d
 # Including deleted lists for redownload detection
 python recovery_plan.py \
   --base-path /mnt/user \
-  --sonarr-list sonarr_deleted_20250801.txt \
-  --radarr-list radarr_deleted_20250801.txt \
+  --sonarr-list out/sonarr_20250801_missing.txt \
+  --radarr-list out/radarr_20250801_missing.txt \
   filelist.disk8.txt
 ```
 
@@ -171,14 +173,14 @@ Verifies that files listed in a `*.backup.txt` (from `recovery_plan.py`) actuall
 
 **Outputs (verify-only)**
 
-- `<input_stem>.backup_confirmed.txt` — found under `--archive-path`
-- `<input_stem>.backup_missing.txt`   — not found under `--archive-path`
+- `out/<input_stem>.backup_confirmed.txt` — found under `--archive-path`
+- `out/<input_stem>.backup_missing.txt`   — not found under `--archive-path`
 
 **Additional outputs when restoring**
 
-- `<input_stem>.restored_ok.txt`      — successfully copied
-- `<input_stem>.restored_skipped.txt` — destination existed or source was a directory; copy skipped
-- `<input_stem>.restored_errors.txt`  — copy failed (tab-separated: `path<TAB>error`)
+- `out/<input_stem>.restored_ok.txt`      — successfully copied
+- `out/<input_stem>.restored_skipped.txt` — destination existed or source was a directory; copy skipped
+- `out/<input_stem>.restored_errors.txt`  — copy failed (tab-separated: `path<TAB>error`)
 
 **Usage**
 
@@ -225,8 +227,8 @@ Finds episodes deleted on a specific date and checks if they've been restored. S
 
 **Outputs**
 
-- `sonarr_YYYYMMDD_missing.txt` — episodes deleted on target date that are still missing
-- `sonarr_YYYYMMDD_restored.txt` — episodes deleted on target date that have been restored
+- `out/sonarr_YYYYMMDD_missing.txt` — episodes deleted on target date that are still missing
+- `out/sonarr_YYYYMMDD_restored.txt` — episodes deleted on target date that have been restored
 
 **Key Features**
 
@@ -261,8 +263,8 @@ Checking status: 100%|████████| 124/124 [00:45<00:00, 2.7episode
 
 === RESULTS ===
 Episodes deleted on 2025-08-01: 124
-Still missing: 89 -> sonarr_20250801_missing.txt
-Restored: 35 -> sonarr_20250801_restored.txt
+Still missing: 89 -> out/sonarr_20250801_missing.txt
+Restored: 35 -> out/sonarr_20250801_restored.txt
 
 Missing episodes by show:
   1883: 10 episode(s)
@@ -291,8 +293,8 @@ Finds movies deleted on a specific date and checks if they've been restored. Sca
 
 **Outputs**
 
-- `radarr_YYYYMMDD_missing.txt` — movies deleted on target date that are still missing
-- `radarr_YYYYMMDD_restored.txt` — movies deleted on target date that have been restored
+- `out/radarr_YYYYMMDD_missing.txt` — movies deleted on target date that are still missing
+- `out/radarr_YYYYMMDD_restored.txt` — movies deleted on target date that have been restored
 
 **Key Features**
 
@@ -327,8 +329,8 @@ Checking status: 100%|████████| 45/45 [00:23<00:00, 1.9movie/s]
 
 === RESULTS ===
 Movies deleted on 2025-08-01: 45
-Still missing: 35 -> radarr_20250801_missing.txt
-Restored: 10 -> radarr_20250801_restored.txt
+Still missing: 35 -> out/radarr_20250801_missing.txt
+Restored: 10 -> out/radarr_20250801_restored.txt
 
 Missing movies by collection:
   Collection 2000-2009: 15 movie(s)
@@ -349,8 +351,8 @@ Both tools produce outputs that integrate seamlessly with `recovery_plan.py`:
 # Use the deletion lists to identify redownloadable content
 python recovery_plan.py \
   --base-path /mnt/user \
-  --sonarr-list sonarr_20250801_missing.txt \
-  --radarr-list radarr_20250801_missing.txt \
+  --sonarr-list out/sonarr_20250801_missing.txt \
+  --radarr-list out/radarr_20250801_missing.txt \
   filelist.disk8.txt
 ```
 

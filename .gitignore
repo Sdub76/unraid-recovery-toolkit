@@ -1,0 +1,99 @@
+# Output files - all generated content goes in out/
+out/
+
+# Data files - file lists and backups
+filelist.*.txt
+*.backup.txt
+*.found.txt
+*.missing.txt
+*.redownload.txt
+*.confirmed.txt
+*.restored*.txt
+*.backup_*.txt
+
+# Radarr/Sonarr exports
+radarr_*.txt
+sonarr_*.txt
+
+# Excel/analysis files
+*.xlsx
+*.xls
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+*-venv/
+recovery-venv/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+~$*
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Test data (but keep example configs)
+test_data/
+sample_data/
+test_input.txt
+test_output_dirs.sh
+
+# Backup of scripts
+*.py.old
+*.py.bak
+*.py.backup
+
+# Archive directories  
+_trash/
+old/
+backup/

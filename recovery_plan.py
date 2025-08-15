@@ -135,10 +135,13 @@ def main():
     deleted_set = load_deleted_set((args.sonarr_list or []) + (args.radarr_list or []))
 
     stem = os.path.splitext(os.path.basename(args.input_file))[0]
-    found_path      = f"{stem}.found.txt"
-    backup_path     = f"{stem}.backup.txt"
-    redownload_path = f"{stem}.redownload.txt"
-    missing_path    = f"{stem}.missing.txt"
+    
+    # Ensure output directory exists
+    os.makedirs("out", exist_ok=True)
+    found_path      = f"out/{stem}.found.txt"
+    backup_path     = f"out/{stem}.backup.txt"
+    redownload_path = f"out/{stem}.redownload.txt"
+    missing_path    = f"out/{stem}.missing.txt"
 
     # Counters
     n_read = n_blank = n_filtered = 0

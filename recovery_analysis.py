@@ -210,7 +210,10 @@ def main() -> None:
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     in_stem = os.path.splitext(os.path.basename(args.input_file))[0]
-    out_name = f"{in_stem}_{timestamp}.xlsx"
+    
+    # Ensure output directory exists
+    os.makedirs("out", exist_ok=True)
+    out_name = f"out/{in_stem}_{timestamp}.xlsx"
 
     
     
