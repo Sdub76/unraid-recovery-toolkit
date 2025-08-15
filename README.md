@@ -111,7 +111,6 @@ python recovery_analysis.py [--levels N] [--folder PREFIX] [--backup-file FILE] 
   * Final bold **Total**
 
 ---
-\1
 
 ## recovery_plan.py
 
@@ -149,6 +148,7 @@ python recovery_plan.py \
 - `--sonarr-list` and `--radarr-list` can be repeated to include multiple exported files. If you omit them, the script ignores redownload detection entirely.
 - At the end of the run, the on-screen summary includes a breakdown of **MISSING** files grouped by top-level folder, with counts split by file extension (case-insensitive).
 
+---
 
 ## recovery_restore.py
 
