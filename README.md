@@ -1,114 +1,114 @@
+# Disaster Recovery Playbook (High‑Level Flow)
+
+This is the intended end‑to‑end flow when things go sideways. It’s opinionated, boringly reliable, and tested against real-world “oh no” moments.
+
+1. **Nightly hygiene** — Run the filelist script every night on Unraid, with Healthchecks monitoring the job.
+2. **Disaster strikes** — Array corruption or accidental deletes slip past parity. (It happens. Deep breath.)
+3. **Freeze backups** — Suspend Borg backups to avoid snapshotting bad state; extract the latest file list from the most recent archive for reference.
+4. **Scope the blast radius** — Run `recovery_analysis.py` to build the Excel summary and see what’s missing by folder/depth.
+5. **Audit the dark day** — Run `sonarr_deleted.py` and `radarr_deleted.py` to list what those apps marked as deleted around the incident window.
+6. **Plan the recovery** — Run `recovery_plan.py` to classify: what still exists on the array, what should be in backup, what Sonarr/Radarr can redownload, and what’s truly missing.
+7. **Verify the backup** — In a Borg shell, mount the latest archive and run `recovery_restore.py` against the `.backup.txt` output to confirm which files are actually present in the archive.
+8. **Cross‑check** — Feed the `recovery_restore` outputs back into `recovery_analysis.py` to ensure any missing files are expected (e.g., excluded via `.nobackup`).
+9. **Queue redownloads** — Re‑run `sonarr_deleted.py` and `radarr_deleted.py` with `--redownload` to let your apps re‑request genuinely missing media.
+10. **Restore from backup** — Re‑run `recovery_restore.py` with `--archive-path` and `--restore-path` to copy confirmed files back onto storage (mount the destination into the borgmatic container).
+11. **Celebrate** — Your layered strategy worked. Any stragglers should be metadata or intentionally excluded files.
+
+---
 # Recovery Toolkit
 
 This toolkit currently includes these scripts:
 
 - **recovery_analysis.py** — summarize file counts by directory depth into Excel workbooks.
 - **recovery_plan.py** — classify files as FOUND / BACKUP / REDOWNLOAD / MISSING.
-- **recovery_restore.py** — verify that files listed in a `*.backup.txt` actually exist under a Borg mount (read-only presence check). — classify files as FOUND / BACKUP / MISSING based on filesystem presence and top-level backup set.
-
-A third script for automated **Borg backup restores** will be added later.
-
----
+- **recovery_restore.py** — verify files in a mounted archive and optionally restore with `--restore-path`.
+- **sonarr_deleted.py** — export Sonarr-deleted items for a date range; with `--redownload` re-request only **missing** episodes.
+- **radarr_deleted.py** — export Radarr-deleted items for a date range; with `--redownload` re-request only **missing** movies.
 
 ## Setup
 
-### 1) Install required system packages (Debian/Ubuntu)
+### 0) Create & activate a Python virtual environment (venv)
 
-On Debian/Ubuntu with Python 3.11+ you may hit the *“externally managed environment”* error due to [PEP 668].  
-Fix it by installing the full Python venv tooling:
-
+**macOS / Linux (bash/zsh) — keep venvs under your home directory:**
 ```bash
-sudo apt update
-sudo apt install -y python3-venv python3-full
-```
-
-### 2) Create and activate a **virtual environment**
-
-> Replace `$HOME/recovery-venv` with whatever folder you want, preferably somewhere you own (not a shared mount).
-
-**Linux / macOS (bash/zsh)**
-```bash
-python3 -m venv $HOME/recovery-venv
-source $HOME/recovery-venv/bin/activate
-python -m pip install -U pip
+mkdir -p "$HOME/.venvs"
+export VENV_DIR="$HOME/.venvs/recovery-toolkit"
+python3 -m venv "$VENV_DIR"
+source "$VENV_DIR/bin/activate"    # deactivate later with: deactivate
+python -m pip install -U pip wheel
 python -m pip install -r requirements.txt
 ```
 
-**Windows (PowerShell)**
-```powershell
-python -m venv $HOME\recovery-venv
-$HOME\recovery-venv\Scripts\Activate.ps1
-python -m pip install -U pip
-python -m pip install -r requirements.txt
-```
 
-### 3) Re-using the environment later
+Tip: when the venv is active you’ll usually see `(<name>)` in your shell prompt. Using a fixed path like `$HOME/.venvs/recovery-toolkit`
+means you can activate it from any repo directory with:
+```bash
+source "$HOME/.venvs/recovery-toolkit/bin/activate"
+```
+### 1) Environment
+
+Install dependencies (if running outside Docker/borgmatic):
 
 ```bash
-source $HOME/recovery-venv/bin/activate
+python3 -m pip install -r requirements.txt
+# packages: openpyxl, tqdm, requests
 ```
-When finished:
+
+Set API credentials via environment variables (or pass via flags):
+
 ```bash
-deactivate
+export SONARR_URL="http://localhost:8989"
+export SONARR_API_KEY="your-sonarr-api-key"
+export RADARR_URL="http://localhost:7878"
+export RADARR_API_KEY="your-radarr-api-key"
 ```
 
----
+> Tip: put these in your shell profile or a `.env` that your shell sources.
 
-## Configuring Backup Folders
+### 2) Create `backup_list.txt`
 
-Both **recovery_analysis.py** and **recovery_plan.py** use a text file named `backup_folders.txt`
-to determine which top-level directories are considered part of your backup set.
-
-- Location: same directory where you run the scripts (current working directory).
-- Format: one folder name per line (case-sensitive).
-- Lines starting with `#` are treated as comments and ignored.
-
-Example (`backup_folders.txt`):
+This file lists the **top-level folders** that are fully covered by your Borg backups (one per line, **no leading slash**). Refer to Borgmatic config.yaml.  Example:
 
 ```
-# Top-level folders considered backed up
-appdata
-backup
-books
-documents
-music
-nextcloud
+tv
+movies
 pictures
-sports
+documents
 ```
 
-To add or remove from your backup set, simply edit this file and re-run the scripts.
-If the file is missing, the scripts will exit with an error.
+`recovery_plan.py` will read `backup_folders.txt` by default. If you prefer the name `backup_list.txt`, just point the tool at it:
+
+```bash
+python recovery_plan.py --backup-file backup_list.txt --base-path /mnt/user filelist.disk8.txt
+```
+
+(Only the **top-most path component** needs to be listed; the script handles deeper paths automatically.)
 
 ---
 
-## recovery\_analysis.py
+## recovery_analysis.py
 
-Generates an Excel summary of a filelist with counts by depth.
+Summarizes path counts by directory depth into an Excel workbook for quick triage.
 
-**Usage:**
+**Key features**
+
+- N+ roll-up: each file contributes once at each requested level.
+- `--folder` filter uses **component-boundary**, case-sensitive matching.
+- Progress updates during processing.
+- Output: an Excel workbook with sheets `level1..levelN` containing columns `[Count, Path]` and a totals row.
+
+**Usage**
 
 ```bash
-python recovery_analysis.py [--levels N] [--folder PREFIX] [--backup-file FILE] filelist.diskX.txt
+python recovery_analysis.py [--levels N] [--folder FOLDER] filelist.disk8.txt
 ```
 
-**Arguments:**
+**Examples**
 
-* `filelist.diskX.txt`: Input text file with one file path per line (case-sensitive).
-* `--levels`: Number of levels to analyze (default: 1).
-* `--folder`: Optional prefix filter (case-sensitive, matches whole path components).
-* `--backup-file`: File listing top-level backup directories (default: `backup_folders.txt`).
-
-**Output:**
-
-* Excel file named after input, e.g. `filelist.disk8_2025-08-14_123456.xlsx`
-* One sheet per level (`Level 1`, `Level 2`, …).
-* Each sheet shows:
-
-  * Path components split into columns
-  * `backup` column (`true` if in backup set, blank otherwise)
-  * `count` column
-  * Final bold **Total**
+```bash
+python recovery_analysis.py filelist.disk8.txt
+python recovery_analysis.py --levels 4 --folder tv/Library/Ken filelist.disk8.txt
+```
 
 ---
 
@@ -142,92 +142,98 @@ python recovery_plan.py \
 
 **Notes**
 
-- `--folder` semantics match `recovery_analysis.py`: a file is included if it equals `FOLDER` (rare for files-only lists) or starts with `FOLDER/`.
-- Progress bar updates at least every 5 seconds.
-- All outputs are UTF-8, one path per line.
-- `--sonarr-list` and `--radarr-list` can be repeated to include multiple exported files. If you omit them, the script ignores redownload detection entirely.
-- At the end of the run, the on-screen summary includes a breakdown of **MISSING** files grouped by top-level folder, with counts split by file extension (case-insensitive).
+- `--folder` semantics match `recovery_analysis.py`: a file is included if it equals `FOLDER` or starts with `FOLDER/`.
+- If you omit `--sonarr-list` / `--radarr-list`, the redownload check is ignored (everything routes to MISSING unless found/in-backup).
+- End-of-run summary includes a breakdown of **MISSING** files grouped by top-level folder, with counts split by file extension (case-insensitive).
 
 ---
 
 ## recovery_restore.py
 
-Verifies that files listed in a `*.backup.txt` actually exist under a mounted Borg archive. **Read-only** — it does not restore files. Useful to validate that your backup contains all items flagged as `BACKUP` by `recovery_plan.py` before attempting any restoration workflow.
+Verifies that files listed in a `*.backup.txt` (from `recovery_plan.py`) actually exist under a **mounted archive path** and can optionally **restore** them to a destination.
 
-**Outputs** (written to the current directory; `<input_stem>` is the input filename without extension):
+**Outputs (verify-only)**
 
-- `<input_stem>.backup_confirmed.txt` — found under the Borg mount
-- `<input_stem>.backup_missing.txt`   — not found under the Borg mount
+- `<input_stem>.backup_confirmed.txt` — found under `--archive-path`
+- `<input_stem>.backup_missing.txt`   — not found under `--archive-path`
+
+**Additional outputs when restoring**
+
+- `<input_stem>.restored_ok.txt`      — successfully copied
+- `<input_stem>.restored_skipped.txt` — destination existed or source was a directory; copy skipped
+- `<input_stem>.restored_errors.txt`  — copy failed (tab-separated: `path<TAB>error`)
 
 **Usage**
 
 ```bash
-# Inside a borgmatic/borghaus shell, with the archive mounted
+# Verify presence only
 python recovery_restore.py \
-  --borg-mount /mnt/borg/mount/2025-08-01/mnt/user \
+  --archive-path /mnt/borg/mount/2025-08-01/mnt/user \
   filelist.disk8.backup.txt
 
-# Restrict to a subfolder (component-boundary, case-sensitive)
+# Verify subset
 python recovery_restore.py \
-  --borg-mount /mnt/borg/mount/2025-08-01/mnt/user \
+  --archive-path /mnt/borg/mount/2025-08-01/mnt/user \
   --folder tv/Library/Ken \
   filelist.disk8.backup.txt
 
-# Require regular files only (exclude directories/symlinks)
+# Restore verified files to a mounted drive
 python recovery_restore.py \
-  --borg-mount /mnt/borg/mount/2025-08-01/mnt/user \
-  --strict-files \
+  --archive-path /mnt/borg/mount/2025-08-01/mnt/user \
+  --restore-path /mnt/restore_target \
   filelist.disk8.backup.txt
 ```
 
 **Notes**
 
-- `--borg-mount` should point to the **exact subdirectory** in the mounted archive that corresponds to the root of your file list (e.g., `/mnt/borg/mount/<snapshot>/mnt/user`).
-- `--folder` uses the same semantics as the other tools: matches `FOLDER` or `FOLDER/…` at path-component boundaries.
-- A simple progress indicator prints updates periodically as `
-Scanned X/Y (Z%)`, with a newline per update (works fine whether or not the terminal overwrites on CR).
-- Phase 2 (future): `--restore PATH` to copy files out, one-by-one.
-
-
----
-## radarr_deleted.py
-
-Summarizes deleted movies from Radarr on a given date, grouped by **root folder**.
-
-**Usage:**
-
-```bash
-# env vars are optional; flags override them
-export RADARR_URL="http://radarr.local:7878"
-export RADARR_API_KEY="your_api_key"
-
-# Run for a specific date (local time, defaults to TZ offset -04:00)
-python3 radarr_deleted.py --date 2025-08-01
-```
-
-**Output:**
-
-- On-screen summary grouped by Radarr root folder (3rd-level folder under `/movies/...`).
-- A text file listing deleted paths with leading `/movies` removed.
+- `--archive-path` points to the exact subdirectory in the mounted archive that corresponds to your file list root (e.g., `/mnt/borg/mount/<snapshot>/mnt/user`).
+- `--folder` uses the same component-boundary semantics as the other tools.
+- Uses `shutil.copy2` to preserve basic metadata; creates destination directories as needed; **skips** if the destination already exists.
+- Read-only unless `--restore-path` is supplied.
 
 ---
 
 ## sonarr_deleted.py
 
-Summarizes deleted episodes from Sonarr on a given date, grouped by **series name**.
+Exports Sonarr-deleted items for a given local **date** (24h window), normalized to relative paths (e.g., `tv/...`).
 
-**Usage:**
+**Arguments**
 
-```bash
-# env vars are optional; flags override them
-export SONARR_URL="http://sonarr.local:8989"
-export SONARR_API_KEY="your_api_key"
+- `--date YYYY-MM-DD` (required): local calendar date to inspect.
+- `--tz-offset ±HH:MM` (default `-04:00`): local timezone offset used to compute the 24h window.
+- `--sonarr-url` (default from `$SONARR_URL` or `http://localhost:8989`)
+- `--api-key` (default from `$SONARR_API_KEY`)
+- `--basenames`: write only basenames instead of full relative paths
+- `--out`: override output filename (default `sonarr_deleted_YYYYMMDD.txt`)
+- `--redownload`: queue EpisodeSearch for matching episodes (**missing-only**, see below)
 
-# Run for a specific date (local time, defaults to TZ offset -04:00)
-python3 sonarr_deleted.py --date 2025-08-01
-```
+**Output**
 
-**Output:**
+- `sonarr_deleted_YYYYMMDD.txt` — one normalized path per line
 
-- On-screen summary grouped alphabetically by show, with counts of deleted episodes.
-- A text file listing deleted episode paths with leading `/tv` removed.
+**Redownload option**
+
+If you pass `--redownload`, the script first checks each episode via the Sonarr API and **only queues EpisodeSearch for episodes that are actually missing** (`hasFile == false` or 404). Episodes that already have a file are skipped.
+
+---
+
+## radarr_deleted.py
+
+Exports Radarr-deleted items for a given local **date** (24h window), normalized to relative paths (e.g., `movies/...`).
+
+**Arguments**
+
+- `--date YYYY-MM-DD` (required): local calendar date to inspect.
+- `--tz-offset ±HH:MM` (default `-04:00`)
+- `--radarr-url` (default from `$RADARR_URL` or `http://localhost:7878`)
+- `--api-key` (default from `$RADARR_API_KEY`)
+- `--out`: override output filename (default `radarr_deleted_YYYYMMDD.txt`)
+- `--redownload`: queue MoviesSearch for matching movies (**missing-only**, see below)
+
+**Output**
+
+- `radarr_deleted_YYYYMMDD.txt` — one normalized path per line
+
+**Redownload option**
+
+If you pass `--redownload`, the script first checks each movie via the Radarr API and **only queues MoviesSearch for movies that are actually missing** (`hasFile == false` or 404). Existing files are skipped. `monitored` is set to true only for those missing titles.
