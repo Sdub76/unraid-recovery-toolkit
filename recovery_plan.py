@@ -1,11 +1,11 @@
-
 #!/usr/bin/env python3
-# recovery_plan.py — Classify files as FOUND on current filesystem, in BACKUP set, or MISSING.
+# recovery_plan.py — Classify files as FOUND on current filesystem, in BACKUP set, REDOWNLOAD, or MISSING.
 #
 # Categories (checked in this order):
-#   1) FOUND   -> if os.path.exists(os.path.join(--base-path, <relative_path>)) is True
-#   2) BACKUP  -> if NOT found, but the file's top-level directory is in the known backup set
-#   3) MISSING -> everything else
+#   1) FOUND       -> if os.path.exists(os.path.join(--base-path, <relative_path>)) is True
+#   2) BACKUP      -> if NOT found, but the file's top-level directory is in the known backup set
+#   3) REDOWNLOAD  -> if NOT found and NOT in backup set, but present in Sonarr/Radarr deleted lists
+#   4) MISSING     -> everything else
 #
 # Filtering:
 #   --folder uses a case-sensitive, path-component-boundary match (same semantics as recovery_analysis.py).
@@ -13,17 +13,20 @@
 # Outputs (written to current working dir, named from input file's stem):
 #   <stem>.found.txt
 #   <stem>.backup.txt
+#   <stem>.redownload.txt
 #   <stem>.missing.txt
 #
 # Progress:
 #   Single tqdm bar over total input lines; prints a summary table at the end.
 #
 # Usage:
-#   python recovery_plan.py --base-path /mnt/user [--folder pictures/photoprism] filelist.disk8.txt
-
+#   python recovery_plan.py --base-path /mnt/user [--folder pictures/photoprism] #       [--sonarr-list sonarr_deleted_YYYYMMDD.txt] [--radarr-list radarr_deleted_YYYYMMDD.txt] #       filelist.disk8.txt
+#
 import argparse
 import os
 import sys
+from datetime import datetime
+from tqdm import tqdm
 
 def load_backup_folders(file_path="backup_folders.txt"):
     if not os.path.isfile(file_path):
@@ -38,11 +41,27 @@ def load_backup_folders(file_path="backup_folders.txt"):
             folders.add(s)
     return folders
 
-
-from datetime import datetime
-from tqdm import tqdm
-
-
+def load_deleted_set(paths):
+    """
+    Load one or more text files containing paths of deleted items.
+    Each file is expected to be UTF-8, one path per line, already normalized to
+    leading-less 'tv/...' or 'movies/...' (as produced by sonarr_deleted.py / radarr_deleted.py).
+    Returns a set of exact strings for O(1) membership checks.
+    Silently skips unreadable files.
+    """
+    out = set()
+    for p in paths or []:
+        try:
+            with open(p, "r", encoding="utf-8", errors="strict") as f:
+                for line in f:
+                    s = line.strip()
+                    if s:
+                        out.add(s)
+        except FileNotFoundError:
+            print(f"Warning: deleted list not found: {p}", file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: could not read deleted list {p}: {e}", file=sys.stderr)
+    return out
 
 def count_lines_binary(file_path: str, chunk_size: int = 8 * 1024 * 1024) -> int:
     total = 0
@@ -79,13 +98,17 @@ def top_level_component(relpath: str) -> str:
     return parts[0] if parts else relpath
 
 def parse_args():
-    ap = argparse.ArgumentParser(description="Classify file list into FOUND/BACKUP/MISSING by probing a base path.")
-    ap.add_argument("--backup-file", type=str, default="backup_folders.txt", help="Path to backup_folders.txt (default: backup_folders.txt).")
+    ap = argparse.ArgumentParser(description="Classify file list into FOUND/BACKUP/REDOWNLOAD/MISSING by probing a base path.")
+    ap.add_argument("--backup-file", type=str, default="backup_folders.txt", help="Path to backup_folders.txt (default: backup_folders.txt)." )
     ap.add_argument("--folder", type=str, default=None,
                     help="Case-sensitive component-boundary prefix filter (e.g., 'tv/Library/Ken').")
     ap.add_argument("--base-path", type=str, default="/mnt/user",
-                    help="Absolute base path to probe for file existence (default: /mnt/user).")
-    ap.add_argument("input_file", type=str, help="UTF-8 file with relative paths (one per line).")
+                    help="Absolute base path to probe for file existence (default: /mnt/user)." )
+    ap.add_argument("--sonarr-list", action="append", default=None,
+                    help="Path to a sonarr_deleted_YYYYMMDD.txt (can be repeated)." )
+    ap.add_argument("--radarr-list", action="append", default=None,
+                    help="Path to a radarr_deleted_YYYYMMDD.txt (can be repeated)." )
+    ap.add_argument("input_file", type=str, help="UTF-8 file with relative paths (one per line)." )
     return ap.parse_args()
 
 def main():
@@ -108,21 +131,25 @@ def main():
 
     backup_set = load_backup_folders(args.backup_file)
 
+    # Load optional deleted lists (normalized 'tv/...', 'movies/...')
+    deleted_set = load_deleted_set((args.sonarr_list or []) + (args.radarr_list or []))
+
     stem = os.path.splitext(os.path.basename(args.input_file))[0]
-    found_path   = f"{stem}.found.txt"
-    backup_path  = f"{stem}.backup.txt"
-    missing_path = f"{stem}.missing.txt"
+    found_path      = f"{stem}.found.txt"
+    backup_path     = f"{stem}.backup.txt"
+    redownload_path = f"{stem}.redownload.txt"
+    missing_path    = f"{stem}.missing.txt"
 
     # Counters
     n_read = n_blank = n_filtered = 0
-    c_found = c_backup = c_missing = 0
+    c_found = c_backup = c_redl = c_missing = 0
+
+    # Aggregation for on-screen summary of MISSING files:
+    # { top_level: { ext: count } }, where ext is lowercase without dot; empty -> "<noext>"
+    missing_tree = {}
 
     # Open outputs once, stream write
-    with open(found_path, "w", encoding="utf-8") as f_found, \
-         open(backup_path, "w", encoding="utf-8") as f_backup, \
-         open(missing_path, "w", encoding="utf-8") as f_missing, \
-         open(args.input_file, "r", encoding="utf-8", errors="strict") as fin, \
-         tqdm(total=total_lines, unit=" lines", mininterval=5.0, desc="Scanning") as bar:
+    with open(found_path, "w", encoding="utf-8") as f_found,          open(backup_path, "w", encoding="utf-8") as f_backup,          open(redownload_path, "w", encoding="utf-8") as f_redl,          open(missing_path, "w", encoding="utf-8") as f_missing,          open(args.input_file, "r", encoding="utf-8", errors="strict") as fin,          tqdm(total=total_lines, unit=" lines", mininterval=5.0, desc="Scanning") as bar:
 
         for line in fin:
             bar.update(1)
@@ -147,14 +174,27 @@ def main():
             if top_level_component(s) in backup_set:
                 f_backup.write(s + "\n")
                 c_backup += 1
+                continue
+
+            # Deleted (candidate for redownload)?
+            if s in deleted_set:
+                f_redl.write(s + "\n")
+                c_redl += 1
             else:
                 f_missing.write(s + "\n")
                 c_missing += 1
+                # Track into missing_tree
+                tl = top_level_component(s)
+                base = s.rsplit("/", 1)[-1]
+                _, ext = os.path.splitext(base)
+                ext_key = (ext[1:] if ext.startswith(".") else ext).lower() or "<noext>"
+                bucket = missing_tree.setdefault(tl, {})
+                bucket[ext_key] = bucket.get(ext_key, 0) + 1
 
     if n_read == 0:
         msg = "No matching records to classify"
         if args.folder:
-            msg += f" (check --folder='{args.folder}' ?)"
+            msg += f" (check --folder='{args.folder}' ? )"
         print(msg, file=sys.stderr)
         sys.exit(2)
 
@@ -171,13 +211,25 @@ def main():
         print(f"Blank:       {n_blank:,} lines ignored")
 
     print("\nBreakdown:")
-    print(f"  FOUND:     {c_found:,}")
-    print(f"  BACKUP:    {c_backup:,}")
-    print(f"  MISSING:   {c_missing:,}")
+    print(f"  FOUND:       {c_found:,}")
+    print(f"  BACKUP:      {c_backup:,}")
+    print(f"  REDOWNLOAD:  {c_redl:,}")
+    print(f"  MISSING:     {c_missing:,}")
+
+    # Tree summary of MISSING: top-level -> counts by extension (case-insensitive)
+    if c_missing:
+        print("\nMissing file breakdown (top-level ▶ ext: count):")
+        for tl in sorted(missing_tree.keys()):
+            total_tl = sum(missing_tree[tl].values())
+            print(f"  {tl}/  —  {total_tl} file(s)")
+            # Sort by count desc, then ext asc
+            for ext, cnt in sorted(missing_tree[tl].items(), key=lambda kv: (-kv[1], kv[0])):
+                print(f"    └─ {ext}: {cnt}")
 
     print("\nOutputs:")
     print(f"  {found_path}")
     print(f"  {backup_path}")
+    print(f"  {redownload_path}")
     print(f"  {missing_path}")
 
 if __name__ == "__main__":
