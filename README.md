@@ -12,7 +12,7 @@ This is the intended end‑to‑end flow when things go sideways. It’s opinion
 8. **Cross‑check** — Feed the `recovery_restore` outputs back into `recovery_analysis.py` to ensure any missing files are expected (e.g., excluded via `.nobackup`).
 9. **Queue redownloads** — Re‑run `sonarr_deleted.py` and `radarr_deleted.py` with `--redownload` to let your apps re‑request genuinely missing media.
 10. **Restore from backup** — Re‑run `recovery_restore.py` with `--archive-path` and `--restore-path` to copy confirmed files back onto storage (mount the destination into the borgmatic container).
-11. **Celebrate** — Your layered strategy worked. Any stragglers should be metadata or intentionally excluded files.  Don't forget to re-enable borg backups.
+11. **Celebrate** — Your layered strategy worked. Any stragglers should be metadata or intentionally excluded files.  Don't forget to resume Borg backups.
 
 ---
 # Recovery Toolkit
