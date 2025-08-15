@@ -1,226 +1,329 @@
 #!/usr/bin/env python3
 import os, sys, argparse, datetime as dt, time
+from collections import OrderedDict, Counter
 import requests
 from tqdm import tqdm
-from collections import Counter
 
 # ----------------------
 # Time / window helpers
 # ----------------------
 def parse_offset(tzoff: str) -> dt.timezone:
-    """tzoff like '+00:00' or '-04:00' -> datetime.timezone"""
     sign = 1 if tzoff.startswith("+") else -1
     hh, mm = tzoff[1:].split(":")
     return dt.timezone(sign * dt.timedelta(hours=int(hh), minutes=int(mm)))
 
 def local_window_to_utc(ymd: str, tzoff: str):
-    """Return (start_utc, end_utc) for the given local calendar day."""
     tz = parse_offset(tzoff)
     start_local = dt.datetime.strptime(ymd, "%Y-%m-%d").replace(tzinfo=tz)
     end_local = start_local + dt.timedelta(days=1)
     return start_local.astimezone(dt.timezone.utc), end_local.astimezone(dt.timezone.utc)
 
-def iso_z(ts: dt.datetime) -> str:
-    """UTC ISO string with 'Z' suffix."""
-    return ts.isoformat(timespec="seconds").replace("+00:00", "Z")
-
-def parse_rfc3339(s: str) -> dt.datetime:
-    """Parse Sonarr/Radarr RFC3339 string into aware datetime."""
-    if s.endswith("Z"):
-        s = s.replace("Z", "+00:00")
-    return dt.datetime.fromisoformat(s)
-
 # ----------------------
-# HTTP helpers
+# HTTP
 # ----------------------
 def make_session(base_url: str, api_key: str) -> requests.Session:
     s = requests.Session()
-    s.headers.update({"X-Api-Key": api_key})
-    r = s.get(f"{base_url}/api/v3/system/status", timeout=15)
-    r.raise_for_status()
+    s.headers.update({"X-Api-Key": api_key, "Accept": "application/json"})
+    s.base_url = base_url.rstrip("/")
     return s
 
 # ----------------------
-# Radarr logic
-# ----------------------
-def fetch_deleted_records(session: requests.Session, base_url: str, start_utc: dt.datetime, end_utc: dt.datetime):
-    """Use /history/since then filter to [start_utc, end_utc) and eventType containing 'deleted'."""
-    r = session.get(f"{base_url}/api/v3/history/since", params={"date": iso_z(start_utc)}, timeout=60)
-    r.raise_for_status()
-    out = []
-    for rec in r.json():
-        when_s = rec.get("date")
-        if not when_s:
-            continue
-        when = parse_rfc3339(when_s)
-        if not (start_utc <= when < end_utc):
-            continue
-        if "deleted" in str(rec.get("eventType", "")).lower():
-            out.append(rec)
-    return out
-
-def ensure_monitored_true(session: requests.Session, base_url: str, movie_ids):
-    for mid in tqdm(movie_ids, desc="Setting monitored=True", unit="movies"):
-        r = session.get(f"{base_url}/api/v3/movie/{mid}", timeout=30)
-        if r.status_code != 200:
-            continue
-        movie = r.json()
-        if not movie.get("monitored", False):
-            movie["monitored"] = True
-            pr = session.put(f"{base_url}/api/v3/movie/{mid}", json=movie, timeout=60)
-            pr.raise_for_status()
-
-
-def filter_missing_movies(session, base_url, movie_ids):
-    """
-    Query Radarr for each movie and return only those that are actually missing (hasFile == False or 404).
-    Conservative behavior: on any request error, treat as missing so we don't skip a needed re-request.
-    """
-    missing = []
-    with tqdm(total=len(movie_ids), desc="Checking movie state", unit="mov") as bar:
-        for mid in movie_ids:
-            try:
-                r = session.get(f"{base_url}/api/v3/movie/{mid}", timeout=30)
-                if r.status_code == 404:
-                    missing.append(mid)
-                else:
-                    r.raise_for_status()
-                    if not r.json().get("hasFile", False):
-                        missing.append(mid)
-            except Exception:
-                missing.append(mid)
-            bar.update(1)
-    return missing
-def queue_movies_search(session: requests.Session, base_url: str, movie_ids):
-    BATCH = 100
-    with tqdm(total=len(movie_ids), desc="Queueing MoviesSearch", unit="movies") as bar:
-        for i in range(0, len(movie_ids), BATCH):
-            chunk = movie_ids[i:i + BATCH]
-            r = session.post(f"{base_url}/api/v3/command",
-                             json={"name": "MoviesSearch", "movieIds": chunk},
-                             timeout=60)
-            r.raise_for_status()
-            bar.update(len(chunk))
-            time.sleep(0.15)
-
-# ----------------------
-# Path helpers
+# Path normalization
 # ----------------------
 def split_path_anysep(p: str):
-    """Split on either / or \ so Windows-style paths don't break logic."""
-    return [x for x in p.replace("\\", "/").split("/") if x]
+    r"""Split on either / or \ so Windows-style paths don't break logic."""
+    return [seg for seg in p.replace("\\", "/").split("/") if seg]
 
-def normalize_root_prefix_for_output(p: str) -> str:
-    """
-    For output file only:
-      - '/movies/... ' -> 'movies/...'
-      - '/tv/... '     -> 'tv/...'
-    Everything else left as-is.
-    """
-    if p == "/tv": return "tv"
-    if p == "/movies": return "movies"
-    if p.startswith("/tv/"): return "tv" + p[len("/tv"):]
-    if p.startswith("/movies/"): return "movies" + p[len("/movies"):]
-    return p.lstrip("/") if p in ("/", "") else p  # a tiny safety
+def normalize_root_prefix(p: str) -> str:
+    # Map various roots to a consistent 'movies/...'
+    segs = split_path_anysep(p)
+    if not segs:
+        return p
+    lowers = [s.lower() for s in segs]
+    # strip known roots like /mnt/user/movies, /movies, /data/movies, etc.
+    if lowers[0] in {"mnt", "data", "pool"} and len(lowers) >= 3 and lowers[2] in {"movies", "films"}:
+        segs = segs[2:]  # drop 'mnt','user' or 'data','something'
+    elif lowers[0] in {"movies", "films"}:
+        pass
+    elif len(lowers) >= 2 and lowers[1] in {"movies", "films"}:
+        segs = segs[1:]
+    # force root name
+    segs[0] = "movies"
+    return "/".join(segs)
 
-def root_folder_triplet(p: str) -> str:
+def extract_collection_from_path(path: str) -> str:
+    """Extract collection name from movie path like movies/Library/Unwatched/Movie -> Unwatched"""
+    segs = split_path_anysep(path)
+    if len(segs) >= 3:
+        # movies/Library/Collection/Movie -> Collection
+        return segs[2]
+    elif len(segs) >= 2:
+        # movies/Collection/Movie -> Collection  
+        return segs[1]
+    else:
+        return "Unknown"
+
+# ----------------------
+# Radarr API helpers
+# ----------------------
+def find_all_deletions_on_date(session: requests.Session, base_url: str, start_utc: dt.datetime, end_utc: dt.datetime):
     """
-    Summary key: first three components (without leading slash).
-    '/movies/Library/Dan/Title (2024)/file.mkv' -> 'movies/Library/Dan'
+    Scan ALL history records to find movieFileDeleted events on the target date.
+    Returns dict: {movieId: deleted_file_path}
     """
-    parts = split_path_anysep(p.lstrip("/"))
-    if len(parts) >= 3:
-        return "/".join(parts[:3])
-    return "/".join(parts) if parts else "unknown"
+    print(f"Scanning history for deletions between {start_utc} and {end_utc}")
+    
+    deletions = OrderedDict()  # movieId -> deleted file path
+    page = 1
+    found_older_than_range = False
+    total_records_fetched = 0
+    
+    while True:
+        params = {
+            "page": page,
+            "pageSize": 1000,
+            "sortKey": "date", 
+            "sortDirection": "descending"
+        }
+        
+        r = session.get(f"{base_url}/api/v3/history", params=params, timeout=60)
+        r.raise_for_status()
+        
+        data = r.json()
+        records = data.get("records") or data
+        if not records:
+            break
+            
+        total_records_fetched += len(records)
+        page_has_target_date = False
+        
+        for rec in records:
+            date_str = rec.get("date") or rec.get("eventDate")
+            event_type = rec.get("eventType", "").lower()
+            
+            if not date_str:
+                continue
+                
+            # Parse the record date
+            try:
+                record_time = dt.datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            
+            # Check if this record is in our target date range
+            if start_utc <= record_time < end_utc:
+                page_has_target_date = True
+                
+                # Only process movieFileDeleted events
+                if event_type == "moviefiledeleted":
+                    movie_id = rec.get("movieId") or (rec.get("movie") or {}).get("id")
+                    if movie_id:
+                        movie_id = int(movie_id)
+                        
+                        # Get the deleted file path
+                        raw_path = (rec.get("data", {}).get("path") or 
+                                  rec.get("sourceTitle") or 
+                                  rec.get("data", {}).get("movieFilePath") or 
+                                  rec.get("movieFilePath") or "")
+                        
+                        if raw_path:
+                            normalized_path = normalize_root_prefix(raw_path)
+                            deletions[movie_id] = normalized_path
+                        
+            elif record_time < start_utc:
+                # We've gone past our target date range
+                found_older_than_range = True
+        
+        # Stop conditions
+        if len(records) < params["pageSize"]:
+            # We've reached the end of all history
+            break
+            
+        if found_older_than_range and not page_has_target_date:
+            # We've gone past the target date and this page has no target dates
+            break
+            
+        page += 1
+    
+    print(f"Fetched {total_records_fetched} history records, found {len(deletions)} movie deletions on target date")
+    return deletions
+
+def get_current_movie_status(session: requests.Session, base_url: str, movie_id: int):
+    """
+    Check if a movie currently has a file and return its current path.
+    Returns (has_file: bool, current_path: str or None)
+    """
+    try:
+        # Get movie info
+        r = session.get(f"{base_url}/api/v3/movie/{movie_id}", timeout=30)
+        if r.status_code != 200:
+            return False, None
+            
+        movie = r.json()
+        if not movie.get("hasFile", False):
+            return False, None
+            
+        # Get current file details
+        fr = session.get(f"{base_url}/api/v3/moviefile", params={"movieId": movie_id}, timeout=30)
+        if fr.status_code != 200:
+            return False, None
+            
+        files = fr.json() or []
+        if not files:
+            return False, None
+            
+        # Choose the largest file if multiple exist
+        files.sort(key=lambda x: x.get("size", 0), reverse=True)
+        current_file = files[0]
+        
+        # Get the current file path
+        current_path = current_file.get("path") or current_file.get("relativePath")
+        if not current_path:
+            # Fallback: construct from movie path + relative path
+            movie_path = movie.get("path", "")
+            rel_path = current_file.get("relativePath", "")
+            if movie_path and rel_path:
+                current_path = movie_path.rstrip("/") + "/" + rel_path.lstrip("/")
+        
+        if current_path:
+            normalized_path = normalize_root_prefix(current_path)
+            return True, normalized_path
+        else:
+            return True, None  # Has file but couldn't determine path
+            
+    except Exception as e:
+        return False, None
+
+def ensure_monitored_true(session: requests.Session, base_url: str, movie_ids):
+    """Set monitored=True for the given movie IDs"""
+    for mid in tqdm(movie_ids, desc="Set monitored=True", unit="mov"):
+        try:
+            r = session.get(f"{base_url}/api/v3/movie/{mid}", timeout=30)
+            if r.status_code != 200:
+                continue
+            mv = r.json()
+            mv["monitored"] = True
+            u = session.put(f"{base_url}/api/v3/movie/{mid}", json=mv, timeout=30)
+        except Exception:
+            pass
+
+def queue_movies_search(session: requests.Session, base_url: str, movie_ids):
+    """Queue a MoviesSearch command for the given movie IDs"""
+    if not movie_ids:
+        return
+    payload = {"name": "MoviesSearch", "movieIds": movie_ids}
+    try:
+        r = session.post(f"{base_url}/api/v3/command", json=payload, timeout=60)
+        if r.status_code in [200, 201]:
+            print(f"Queued search for {len(movie_ids)} movies")
+        else:
+            print(f"Failed to queue search: HTTP {r.status_code}")
+    except Exception as e:
+        print(f"Error queueing search: {e}")
+
+def get_collection_summary(movies_with_paths):
+    """Get a summary of movies by collection"""
+    per_collection = Counter()
+    for _, path in movies_with_paths:
+        collection = extract_collection_from_path(path)
+        per_collection[collection] += 1
+    return per_collection
 
 # ----------------------
 # Main
 # ----------------------
 def main():
-    ap = argparse.ArgumentParser(description="Radarr deletions by local date; optional re-download")
-    ap.add_argument("--date", required=True, help="Local calendar date (YYYY-MM-DD)")
+    ap = argparse.ArgumentParser(description="Radarr: Find movies deleted on a specific date and check if they've been restored")
+    ap.add_argument("--date", default=dt.date.today().isoformat(), help="Date to check for deletions (YYYY-MM-DD)")
     ap.add_argument("--tz-offset", default="-04:00", help="Local timezone offset (default -04:00)")
     ap.add_argument("--radarr-url", default=os.environ.get("RADARR_URL", "http://localhost:7878"))
     ap.add_argument("--api-key", default=os.environ.get("RADARR_API_KEY"))
-    ap.add_argument("--out", help="Output file (default radarr_deleted_YYYYMMDD.txt)")
-    ap.add_argument("--redownload", action="store_true", help="Set monitored=True and queue MoviesSearch")
+    ap.add_argument("--out", help="Output file prefix (default radarr_YYYYMMDD)")
+    ap.add_argument("--redownload", action="store_true", help="Set monitored=True and queue MoviesSearch for missing movies")
     args = ap.parse_args()
 
     if not args.api_key:
-        print("Missing API key"); sys.exit(2)
+        print("ERROR: Missing API key. Set RADARR_API_KEY or use --api-key")
+        sys.exit(2)
 
+    # Setup file paths
     ymd = args.date.replace("-", "")
-    out_path = args.out or f"radarr_deleted_{ymd}.txt"
+    if args.out:
+        missing_path = f"{args.out}_missing.txt"
+        restored_path = f"{args.out}_restored.txt"
+    else:
+        missing_path = f"radarr_{ymd}_missing.txt"
+        restored_path = f"radarr_{ymd}_restored.txt"
 
     session = make_session(args.radarr_url, args.api_key)
     start_utc, end_utc = local_window_to_utc(args.date, args.tz_offset)
 
-    recs = fetch_deleted_records(session, args.radarr_url, start_utc, end_utc)
-    if not recs:
-        print(f"No deletions found on {args.date}")
-        open(out_path, "w").close()
-        print(f"List written to: {out_path}")
+    print(f"Analyzing Radarr deletions for {args.date}")
+    print(f"Radarr URL: {args.radarr_url}")
+    
+    # Step 1: Find all movies deleted on the target date
+    deletions = find_all_deletions_on_date(session, args.radarr_url, start_utc, end_utc)
+    
+    if not deletions:
+        print(f"No movie deletions found on {args.date}")
+        # Create empty files
+        open(missing_path, "w").close()
+        open(restored_path, "w").close()
         return
 
-    # Collect file paths and movie IDs
-    paths, mids = [], []
-    for r in recs:
-        data = r.get("data") or {}
-        path = data.get("path") or r.get("sourceTitle") or ""
-        if path:
-            paths.append(path)
-        mid = r.get("movieId")
-        if mid:
-            mids.append(int(mid))
-
-    # Dedup preserve order
-    seen = set(); uniq_paths = []
-    for p in paths:
-        if p not in seen:
-            seen.add(p); uniq_paths.append(p)
-    seen = set(); uniq_mids = []
-    for m in mids:
-        if m not in seen:
-            seen.add(m); uniq_mids.append(m)
-
-    # Write output file with normalized /movies or /tv prefix (no leading slash)
-    with open(out_path, "w", encoding="utf-8") as f:
-        for p in uniq_paths:
-            f.write(normalize_root_prefix_for_output(p) + "\n")
-
-    # Optional redownload (missing-only): monitored=True then MoviesSearch
-
-
-    if args.redownload and uniq_mids:
-
-
-        missing_mids = filter_missing_movies(session, args.radarr_url, uniq_mids)
-
-
-        if missing_mids:
-
-
-            ensure_monitored_true(session, args.radarr_url, missing_mids)
-
-
-            queue_movies_search(session, args.radarr_url, missing_mids)
-
-
+    # Step 2: Check current status of each deleted movie
+    print(f"\nChecking current status of {len(deletions)} deleted movies...")
+    
+    missing_movies = []  # [(movieId, deleted_path)]
+    restored_movies = []  # [(movieId, deleted_path, current_path)]
+    
+    for movie_id, deleted_path in tqdm(deletions.items(), desc="Checking status", unit="movie"):
+        has_file, current_path = get_current_movie_status(session, args.radarr_url, movie_id)
+        
+        if has_file and current_path:
+            restored_movies.append((movie_id, deleted_path, current_path))
         else:
-
-
-            print("No missing movies to re-request.")
-
-    # Alphabetical summary by root folder (3 components)
-    per_root = Counter()
-    for p in uniq_paths:
-        per_root[root_folder_triplet(p)] += 1
-
-    print("\n=== Radarr Summary (by root folder) ===")
-    for folder in sorted(per_root):
-        print(f"{folder}: {per_root[folder]} movie(s)")
-
-    print(f"\nList written to: {out_path}")
+            missing_movies.append((movie_id, deleted_path))
+    
+    # Step 3: Write output files
+    print(f"\nWriting results...")
+    
+    # Missing movies file
+    with open(missing_path, "w", encoding="utf-8") as f:
+        for movie_id, deleted_path in sorted(missing_movies, key=lambda x: x[1]):
+            f.write(f"{deleted_path}\n")
+    
+    # Restored movies file  
+    with open(restored_path, "w", encoding="utf-8") as f:
+        for movie_id, deleted_path, current_path in sorted(restored_movies, key=lambda x: x[2]):
+            f.write(f"{current_path}\n")
+    
+    # Step 4: Summary
+    print(f"\n=== RESULTS ===")
+    print(f"Movies deleted on {args.date}: {len(deletions)}")
+    print(f"Still missing: {len(missing_movies)} -> {missing_path}")
+    print(f"Restored: {len(restored_movies)} -> {restored_path}")
+    
+    # Collection summaries
+    if missing_movies:
+        missing_collections = get_collection_summary([(mid, path) for mid, path in missing_movies])
+        print(f"\nMissing movies by collection:")
+        for collection in sorted(missing_collections):
+            print(f"  {collection}: {missing_collections[collection]} movie(s)")
+    
+    if restored_movies:
+        restored_collections = get_collection_summary([(mid, path) for mid, _, path in restored_movies])
+        print(f"\nRestored movies by collection:")
+        for collection in sorted(restored_collections):
+            print(f"  {collection}: {restored_collections[collection]} movie(s)")
+    
+    # Step 5: Optional redownload
+    if args.redownload and missing_movies:
+        print(f"\nTriggering redownload for {len(missing_movies)} missing movies...")
+        missing_movie_ids = [movie_id for movie_id, _ in missing_movies]
+        ensure_monitored_true(session, args.radarr_url, missing_movie_ids)
+        queue_movies_search(session, args.radarr_url, missing_movie_ids)
+        print("Redownload requests queued!")
 
 if __name__ == "__main__":
     main()

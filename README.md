@@ -1,13 +1,13 @@
 # Disaster Recovery Playbook (High‑Level Flow)
 
-This is the intended end‑to‑end flow when things go sideways. It’s opinionated, boringly reliable, and tested against real-world “oh no” moments.
+This is the intended end‑to‑end flow when things go sideways. It's opinionated, boringly reliable, and tested against real-world "oh no" moments.
 
 1. **Nightly hygiene** — Run the filelist script every night on Unraid, with Healthchecks monitoring the job.
 2. **Disaster strikes** — Array corruption or accidental deletes slip past parity. (It happens. Deep breath.)
 3. **Freeze backups** — Suspend Borg backups to avoid snapshotting bad state; extract the latest file list from the most recent archive for reference.
-4. **Scope the blast radius** — Run `recovery_analysis.py` to build the Excel summary and see what’s missing by folder/depth.
+4. **Scope the blast radius** — Run `recovery_analysis.py` to build the Excel summary and see what's missing by folder/depth.
 5. **Audit the dark day** — Run `sonarr_deleted.py` and `radarr_deleted.py` to list what those apps marked as deleted around the incident window.
-6. **Plan the recovery** — Run `recovery_plan.py` to classify: what still exists on the array, what should be in backup, what Sonarr/Radarr can redownload, and what’s truly missing.
+6. **Plan the recovery** — Run `recovery_plan.py` to classify: what still exists on the array, what should be in backup, what Sonarr/Radarr can redownload, and what's truly missing.
 7. **Verify the backup** — In a Borg shell, mount the latest archive and run `recovery_restore.py` against the `.backup.txt` output to confirm which files are actually present in the archive.
 8. **Cross‑check** — Feed the `recovery_restore` outputs back into `recovery_analysis.py` to ensure any missing files are expected (e.g., excluded via `.nobackup`).
 9. **Queue redownloads** — Re‑run `sonarr_deleted.py` and `radarr_deleted.py` with `--redownload` to let your apps re‑request genuinely missing media.
@@ -41,7 +41,7 @@ python -m pip install -r requirements.txt
 ```
 
 
-Tip: when the venv is active you’ll usually see `(<name>)` in your shell prompt. Using a fixed path like `$HOME/.venvs/recovery-toolkit`
+Tip: when the venv is active you'll usually see `(<n>)` in your shell prompt. Using a fixed path like `$HOME/.venvs/recovery-toolkit`
 means you can activate it from any repo directory with:
 ```bash
 source "$HOME/.venvs/recovery-toolkit/bin/activate"
@@ -212,45 +212,146 @@ python recovery_restore.py \
 
 ## sonarr_deleted.py
 
-Exports Sonarr-deleted items for a given local **date** (24h window), normalized to relative paths (e.g., `tv/...`).
+Finds episodes deleted on a specific date and checks if they've been restored. Scans **all** Sonarr history to find `episodeFileDeleted` events, then verifies current status of each episode.
 
 **Arguments**
 
-- `--date YYYY-MM-DD` (required): local calendar date to inspect.
-- `--tz-offset ±HH:MM` (default `-04:00`): local timezone offset used to compute the 24h window.
+- `--date YYYY-MM-DD` (default: today): Local calendar date to inspect for deletions.
+- `--tz-offset ±HH:MM` (default `-04:00`): Local timezone offset used to compute the 24h window.
 - `--sonarr-url` (default from `$SONARR_URL` or `http://localhost:8989`)
 - `--api-key` (default from `$SONARR_API_KEY`)
-- `--basenames`: write only basenames instead of full relative paths
-- `--out`: override output filename (default `sonarr_deleted_YYYYMMDD.txt`)
-- `--redownload`: queue EpisodeSearch for matching episodes (**missing-only**, see below)
+- `--out PREFIX`: Override output filename prefix (default `sonarr_YYYYMMDD`)
+- `--redownload`: Set monitored=True and queue EpisodeSearch for **missing episodes only**
 
-**Output**
+**Outputs**
 
-- `sonarr_deleted_YYYYMMDD.txt` — one normalized path per line
+- `sonarr_YYYYMMDD_missing.txt` — episodes deleted on target date that are still missing
+- `sonarr_YYYYMMDD_restored.txt` — episodes deleted on target date that have been restored
 
-**Redownload option**
+**Key Features**
 
-If you pass `--redownload`, the script first checks each episode via the Sonarr API and **only queues EpisodeSearch for episodes that are actually missing** (`hasFile == false` or 404). Episodes that already have a file are skipped.
+- **Comprehensive scanning**: Pages through ALL history records until it finds the target date
+- **Smart tracking**: Uses episodeId to track deletions, handles restored files with different paths
+- **Missing vs Restored**: Separates items that are truly missing from those that have been restored
+- **Show summaries**: Groups results by show name for easy review
+- **Safe redownload**: Only queues searches for episodes that are actually missing
+
+**Examples**
+
+```bash
+# Check deletions for a specific date
+python sonarr_deleted.py --date 2025-08-01
+
+# With custom output prefix
+python sonarr_deleted.py --date 2025-08-01 --out /tmp/sonarr_audit
+
+# Check and queue redownloads for missing episodes
+python sonarr_deleted.py --date 2025-08-01 --redownload
+```
+
+**Sample Output**
+
+```
+Analyzing Sonarr deletions for 2025-08-01
+Sonarr URL: https://sonarr.waun.net
+Fetched 15000 history records, found 124 episode deletions on target date
+
+Checking current status of 124 deleted episodes...
+Checking status: 100%|████████| 124/124 [00:45<00:00, 2.7episode/s]
+
+=== RESULTS ===
+Episodes deleted on 2025-08-01: 124
+Still missing: 89 -> sonarr_20250801_missing.txt
+Restored: 35 -> sonarr_20250801_restored.txt
+
+Missing episodes by show:
+  1883: 10 episode(s)
+  Adam Ruins Everything: 58 episode(s)
+  Star Trek Discovery: 21 episode(s)
+
+Restored episodes by show:
+  Adam Ruins Everything: 8 episode(s)
+  Star Trek Discovery: 27 episode(s)
+```
 
 ---
 
 ## radarr_deleted.py
 
-Exports Radarr-deleted items for a given local **date** (24h window), normalized to relative paths (e.g., `movies/...`).
+Finds movies deleted on a specific date and checks if they've been restored. Scans **all** Radarr history to find `movieFileDeleted` events, then verifies current status of each movie.
 
 **Arguments**
 
-- `--date YYYY-MM-DD` (required): local calendar date to inspect.
-- `--tz-offset ±HH:MM` (default `-04:00`)
+- `--date YYYY-MM-DD` (default: today): Local calendar date to inspect for deletions.
+- `--tz-offset ±HH:MM` (default `-04:00`): Local timezone offset used to compute the 24h window.
 - `--radarr-url` (default from `$RADARR_URL` or `http://localhost:7878`)
 - `--api-key` (default from `$RADARR_API_KEY`)
-- `--out`: override output filename (default `radarr_deleted_YYYYMMDD.txt`)
-- `--redownload`: queue MoviesSearch for matching movies (**missing-only**, see below)
+- `--out PREFIX`: Override output filename prefix (default `radarr_YYYYMMDD`)
+- `--redownload`: Set monitored=True and queue MoviesSearch for **missing movies only**
 
-**Output**
+**Outputs**
 
-- `radarr_deleted_YYYYMMDD.txt` — one normalized path per line
+- `radarr_YYYYMMDD_missing.txt` — movies deleted on target date that are still missing
+- `radarr_YYYYMMDD_restored.txt` — movies deleted on target date that have been restored
 
-**Redownload option**
+**Key Features**
 
-If you pass `--redownload`, the script first checks each movie via the Radarr API and **only queues MoviesSearch for movies that are actually missing** (`hasFile == false` or 404). Existing files are skipped. `monitored` is set to true only for those missing titles.- **array_file_list.sh** — nightly file inventory exporter (Linux/Unraid). Produces stable, sorted file lists; optional Healthchecks monitoring.
+- **Comprehensive scanning**: Pages through ALL history records until it finds the target date
+- **Smart tracking**: Uses movieId to track deletions, handles restored files with different paths
+- **Missing vs Restored**: Separates items that are truly missing from those that have been restored
+- **Collection summaries**: Groups results by Radarr collection/folder for easy review
+- **Safe redownload**: Only queues searches for movies that are actually missing
+
+**Examples**
+
+```bash
+# Check deletions for a specific date
+python radarr_deleted.py --date 2025-08-01
+
+# With custom output prefix
+python radarr_deleted.py --date 2025-08-01 --out /tmp/radarr_audit
+
+# Check and queue redownloads for missing movies
+python radarr_deleted.py --date 2025-08-01 --redownload
+```
+
+**Sample Output**
+
+```
+Analyzing Radarr deletions for 2025-08-01
+Radarr URL: https://radarr.waun.net
+Fetched 8000 history records, found 45 movie deletions on target date
+
+Checking current status of 45 deleted movies...
+Checking status: 100%|████████| 45/45 [00:23<00:00, 1.9movie/s]
+
+=== RESULTS ===
+Movies deleted on 2025-08-01: 45
+Still missing: 35 -> radarr_20250801_missing.txt
+Restored: 10 -> radarr_20250801_restored.txt
+
+Missing movies by collection:
+  Collection 2000-2009: 15 movie(s)
+  Ken: 5 movie(s)
+  Unwatched: 15 movie(s)
+
+Restored movies by collection:
+  Collection 2000-2009: 3 movie(s)
+  Ken: 3 movie(s)
+  Unwatched: 4 movie(s)
+```
+
+**Integration with recovery_plan.py**
+
+Both tools produce outputs that integrate seamlessly with `recovery_plan.py`:
+
+```bash
+# Use the deletion lists to identify redownloadable content
+python recovery_plan.py \
+  --base-path /mnt/user \
+  --sonarr-list sonarr_20250801_missing.txt \
+  --radarr-list radarr_20250801_missing.txt \
+  filelist.disk8.txt
+```
+
+This allows the recovery system to automatically classify deleted media as "redownloadable" rather than "missing" during disaster recovery.
