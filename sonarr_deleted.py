@@ -43,6 +43,28 @@ def fetch_deleted_records(session, base_url, start_utc, end_utc):
             out.append(rec)
     return out
 
+
+def filter_missing_episodes(session, base_url, episode_ids):
+    """
+    Query Sonarr for each episode and return only those that are actually missing (hasFile == False or 404).
+    Conservative behavior: on any request error, treat as missing so we don't skip a needed re-request.
+    """
+    missing = []
+    with tqdm(total=len(episode_ids), desc="Checking episode state", unit="eps") as bar:
+        for eid in episode_ids:
+            try:
+                r = session.get(f"{base_url}/api/v3/episode/{eid}", timeout=30)
+                if r.status_code == 404:
+                    missing.append(eid)
+                else:
+                    r.raise_for_status()
+                    if not r.json().get("hasFile", False):
+                        missing.append(eid)
+            except Exception:
+                # If API request fails, err on the side of re-requesting
+                missing.append(eid)
+            bar.update(1)
+    return missing
 def queue_episode_search(session, base_url, episode_ids):
     BATCH = 100
     with tqdm(total=len(episode_ids), desc="Queueing EpisodeSearch", unit="eps") as bar:
@@ -150,10 +172,28 @@ def main():
         for line in to_write:
             f.write(line + "\n")
 
-    # optional redownload
+    # optional redownload (missing-only)
+
+
     if args.redownload and uniq_eids:
-        print(f"Queuing {len(uniq_eids)} episode searches…")
-        queue_episode_search(session, args.sonarr_url, uniq_eids)
+
+
+        missing_eids = filter_missing_episodes(session, args.sonarr_url, uniq_eids)
+
+
+        if missing_eids:
+
+
+            print(f"Queuing {len(missing_eids)} episode searches (missing only)…")
+
+
+            queue_episode_search(session, args.sonarr_url, missing_eids)
+
+
+        else:
+
+
+            print("No missing episodes to re-request.")
 
     # per-show summary (alphabetical now)
     if uniq_eids:

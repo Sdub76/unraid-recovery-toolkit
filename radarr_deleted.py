@@ -70,6 +70,27 @@ def ensure_monitored_true(session: requests.Session, base_url: str, movie_ids):
             pr = session.put(f"{base_url}/api/v3/movie/{mid}", json=movie, timeout=60)
             pr.raise_for_status()
 
+
+def filter_missing_movies(session, base_url, movie_ids):
+    """
+    Query Radarr for each movie and return only those that are actually missing (hasFile == False or 404).
+    Conservative behavior: on any request error, treat as missing so we don't skip a needed re-request.
+    """
+    missing = []
+    with tqdm(total=len(movie_ids), desc="Checking movie state", unit="mov") as bar:
+        for mid in movie_ids:
+            try:
+                r = session.get(f"{base_url}/api/v3/movie/{mid}", timeout=30)
+                if r.status_code == 404:
+                    missing.append(mid)
+                else:
+                    r.raise_for_status()
+                    if not r.json().get("hasFile", False):
+                        missing.append(mid)
+            except Exception:
+                missing.append(mid)
+            bar.update(1)
+    return missing
 def queue_movies_search(session: requests.Session, base_url: str, movie_ids):
     BATCH = 100
     with tqdm(total=len(movie_ids), desc="Queueing MoviesSearch", unit="movies") as bar:
@@ -167,10 +188,28 @@ def main():
         for p in uniq_paths:
             f.write(normalize_root_prefix_for_output(p) + "\n")
 
-    # Optional redownload: monitored=True then MoviesSearch
+    # Optional redownload (missing-only): monitored=True then MoviesSearch
+
+
     if args.redownload and uniq_mids:
-        ensure_monitored_true(session, args.radarr_url, uniq_mids)
-        queue_movies_search(session, args.radarr_url, uniq_mids)
+
+
+        missing_mids = filter_missing_movies(session, args.radarr_url, uniq_mids)
+
+
+        if missing_mids:
+
+
+            ensure_monitored_true(session, args.radarr_url, missing_mids)
+
+
+            queue_movies_search(session, args.radarr_url, missing_mids)
+
+
+        else:
+
+
+            print("No missing movies to re-request.")
 
     # Alphabetical summary by root folder (3 components)
     per_root = Counter()
