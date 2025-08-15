@@ -19,6 +19,7 @@ This is the intended end‑to‑end flow when things go sideways. It’s opinion
 
 This toolkit currently includes these scripts:
 
+- **array_file_list.sh** — Build a list of files in a backed up location.  Should be run nightly in Unraid User Scripts and monitored for failure.
 - **recovery_analysis.py** — summarize file counts by directory depth into Excel workbooks.
 - **recovery_plan.py** — classify files as FOUND / BACKUP / REDOWNLOAD / MISSING.
 - **recovery_restore.py** — verify files in a mounted archive and optionally restore with `--restore-path`.
@@ -85,6 +86,22 @@ python recovery_plan.py --backup-file backup_list.txt --base-path /mnt/user file
 (Only the **top-most path component** needs to be listed; the script handles deeper paths automatically.)
 
 ---
+
+## array_file_list.sh
+
+Creates a **stable, sorted inventory** of files so you always have a recent point-in-time list to compare against after an incident.
+
+**What it does**
+- Walks one or more array roots (e.g., `/mnt/disk1`, `/mnt/disk2`, or `/mnt/user`).
+- Writes relative paths (no leading slash) to `filelist.<target>.txt`.
+- Pings a Healthchecks URL at start/success/failure.
+
+**Notes**
+- The output filenames are intentionally simple: `filelist.disk1.txt`, `filelist.disk2.txt`, etc.
+- Healthchecks: set `HC_URL` in the environment (or hardcode) to track job health.
+- These lists are the inputs to `recovery_analysis.py` and `recovery_plan.py` in the disaster flow.
+
+--- 
 
 ## recovery_analysis.py
 
@@ -236,4 +253,4 @@ Exports Radarr-deleted items for a given local **date** (24h window), normalized
 
 **Redownload option**
 
-If you pass `--redownload`, the script first checks each movie via the Radarr API and **only queues MoviesSearch for movies that are actually missing** (`hasFile == false` or 404). Existing files are skipped. `monitored` is set to true only for those missing titles.
+If you pass `--redownload`, the script first checks each movie via the Radarr API and **only queues MoviesSearch for movies that are actually missing** (`hasFile == false` or 404). Existing files are skipped. `monitored` is set to true only for those missing titles.- **array_file_list.sh** — nightly file inventory exporter (Linux/Unraid). Produces stable, sorted file lists; optional Healthchecks monitoring.
