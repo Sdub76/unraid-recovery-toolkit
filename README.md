@@ -1,9 +1,10 @@
 # Recovery Toolkit
 
-This toolkit currently includes two scripts:
+This toolkit currently includes these scripts:
 
 - **recovery_analysis.py** — summarize file counts by directory depth into Excel workbooks.
-- **recovery_plan.py** — classify files as FOUND / BACKUP / MISSING based on filesystem presence and top-level backup set.
+- **recovery_plan.py** — classify files as FOUND / BACKUP / REDOWNLOAD / MISSING.
+- **recovery_restore.py** — verify that files listed in a `*.backup.txt` actually exist under a Borg mount (read-only presence check). — classify files as FOUND / BACKUP / MISSING based on filesystem presence and top-level backup set.
 
 A third script for automated **Borg backup restores** will be added later.
 
@@ -110,41 +111,45 @@ python recovery_analysis.py [--levels N] [--folder PREFIX] [--backup-file FILE] 
   * Final bold **Total**
 
 ---
-## recovery_plan.py
+\1
 
-Scans each path in your file list and determines whether it already exists under a given base path, is covered by your **backup set**, is listed in your **Sonarr/Radarr deleted exports** (so can be redownloaded), or is truly **missing**.
+## recovery_restore.py
+
+Verifies that files listed in a `*.backup.txt` actually exist under a mounted Borg archive. **Read-only** — it does not restore files. Useful to validate that your backup contains all items flagged as `BACKUP` by `recovery_plan.py` before attempting any restoration workflow.
 
 **Outputs** (written to the current directory; `<input_stem>` is the input filename without extension):
 
-- `<input_stem>.found.txt`       — files already present at `--base-path`
-- `<input_stem>.backup.txt`      — not found on disk but within your backed-up top-levels
-- `<input_stem>.redownload.txt`  — not found, not in backup, but present in Sonarr/Radarr deleted lists
-- `<input_stem>.missing.txt`     — neither found, backed up, nor in deleted lists
+- `<input_stem>.backup_confirmed.txt` — found under the Borg mount
+- `<input_stem>.backup_missing.txt`   — not found under the Borg mount
 
 **Usage**
 
 ```bash
-# Example: check if files are present under /mnt/user
-python recovery_plan.py --base-path /mnt/user filelist.disk8.txt
+# Inside a borgmatic/borghaus shell, with the archive mounted
+python recovery_restore.py \
+  --borg-mount /mnt/borg/mount/2025-08-01/mnt/user \
+  filelist.disk8.backup.txt
 
-# With a focused filter (path-component boundary; case-sensitive)
-python recovery_plan.py --base-path /mnt/user --folder tv/Library/Ken filelist.disk8.txt
+# Restrict to a subfolder (component-boundary, case-sensitive)
+python recovery_restore.py \
+  --borg-mount /mnt/borg/mount/2025-08-01/mnt/user \
+  --folder tv/Library/Ken \
+  filelist.disk8.backup.txt
 
-# Including deleted lists for redownload detection
-python recovery_plan.py \
-  --base-path /mnt/user \
-  --sonarr-list sonarr_deleted_20250801.txt \
-  --radarr-list radarr_deleted_20250801.txt \
-  filelist.disk8.txt
+# Require regular files only (exclude directories/symlinks)
+python recovery_restore.py \
+  --borg-mount /mnt/borg/mount/2025-08-01/mnt/user \
+  --strict-files \
+  filelist.disk8.backup.txt
 ```
 
 **Notes**
 
-- `--folder` semantics match `recovery_analysis.py`: a file is included if it equals `FOLDER` (rare for files-only lists) or starts with `FOLDER/`.
-- Progress bar updates at least every 5 seconds.
-- All outputs are UTF-8, one path per line.
-- `--sonarr-list` and `--radarr-list` can be repeated to include multiple exported files. If you omit them, the script ignores redownload detection entirely.
-- At the end of the run, the on-screen summary includes a breakdown of **MISSING** files grouped by top-level folder, with counts split by file extension (case-insensitive).
+- `--borg-mount` should point to the **exact subdirectory** in the mounted archive that corresponds to the root of your file list (e.g., `/mnt/borg/mount/<snapshot>/mnt/user`).
+- `--folder` uses the same semantics as the other tools: matches `FOLDER` or `FOLDER/…` at path-component boundaries.
+- A simple progress indicator prints updates periodically as `Scanned X/Y (Z%)`, with a newline per update (works fine whether or not the terminal overwrites on CR).
+- Phase 2 (future): `--restore PATH` to copy files out, one-by-one.
+
 
 ---
 ## radarr_deleted.py
