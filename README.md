@@ -112,13 +112,14 @@ python recovery_analysis.py [--levels N] [--folder PREFIX] [--backup-file FILE] 
 ---
 ## recovery_plan.py
 
-Scans each path in your file list and determines whether it already exists under a given base path, is covered by your **backup set** , or is truly **missing**.
+Scans each path in your file list and determines whether it already exists under a given base path, is covered by your **backup set**, is listed in your **Sonarr/Radarr deleted exports** (so can be redownloaded), or is truly **missing**.
 
 **Outputs** (written to the current directory; `<input_stem>` is the input filename without extension):
 
-- `<input_stem>.found.txt`   — files already present at `--base-path`
-- `<input_stem>.backup.txt`  — not found on disk but within your backed-up top-levels
-- `<input_stem>.missing.txt` — neither found nor in backup set
+- `<input_stem>.found.txt`       — files already present at `--base-path`
+- `<input_stem>.backup.txt`      — not found on disk but within your backed-up top-levels
+- `<input_stem>.redownload.txt`  — not found, not in backup, but present in Sonarr/Radarr deleted lists
+- `<input_stem>.missing.txt`     — neither found, backed up, nor in deleted lists
 
 **Usage**
 
@@ -128,6 +129,13 @@ python recovery_plan.py --base-path /mnt/user filelist.disk8.txt
 
 # With a focused filter (path-component boundary; case-sensitive)
 python recovery_plan.py --base-path /mnt/user --folder tv/Library/Ken filelist.disk8.txt
+
+# Including deleted lists for redownload detection
+python recovery_plan.py \
+  --base-path /mnt/user \
+  --sonarr-list sonarr_deleted_20250801.txt \
+  --radarr-list radarr_deleted_20250801.txt \
+  filelist.disk8.txt
 ```
 
 **Notes**
@@ -135,7 +143,8 @@ python recovery_plan.py --base-path /mnt/user --folder tv/Library/Ken filelist.d
 - `--folder` semantics match `recovery_analysis.py`: a file is included if it equals `FOLDER` (rare for files-only lists) or starts with `FOLDER/`.
 - Progress bar updates at least every 5 seconds.
 - All outputs are UTF-8, one path per line.
-
+- `--sonarr-list` and `--radarr-list` can be repeated to include multiple exported files. If you omit them, the script ignores redownload detection entirely.
+- At the end of the run, the on-screen summary includes a breakdown of **MISSING** files grouped by top-level folder, with counts split by file extension (case-insensitive).
 
 ---
 ## radarr_deleted.py
