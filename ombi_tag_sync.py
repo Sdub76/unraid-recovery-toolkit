@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Ombi → Radarr/Sonarr tag backfill (no status filtering; 1:1 Ombi tags).
+Ombi → Radarr/Sonarr tag backfill (no status filtering; 1:1 Ombi tags) + UNMATCHED CSVs.
 
 ENV VARS (required):
   OMBI_URL, OMBI_API_KEY
@@ -13,6 +13,12 @@ Default: preview only (writes CSVs).
 --write radarr      apply tags to Radarr movies
 --write sonarr      apply tags to Sonarr series
 --apply-tags MODE   add|replace|remove (default: add)
+
+Outputs (in --outdir):
+  radarr_preview.csv     requester, tmdbId, radarrId, title, proposedTag
+  sonarr_preview.csv     requester, tvdbId, sonarrId, title, proposedTag
+  radarr_unmatched.csv   requester, tmdbId, title, year, note
+  sonarr_unmatched.csv   requester, tvdbId, title, note
 """
 
 import argparse, csv, os, sys, time, requests
@@ -98,7 +104,7 @@ class Ombi:
                            "tmdbId": None, "tvdbId": s.get("tvDbId")})
         return movies, tv
     def fetch_all(self) -> Tuple[List[dict], List[dict]]:
-        progress("Step 1/5: Fetching Ombi requests (movies & tv)…")
+        progress("Step 1/6: Fetching Ombi requests (movies & tv)…")
         m = self._rest("/api/v1/Request/movie"); t = self._rest("/api/v1/Request/tv")
         if m is None or t is None:
             progress("…REST not available; falling back to GraphQL")
@@ -111,7 +117,7 @@ class Radarr:
     def __init__(self, base: str, key: str, http: Http):
         self.base = base.rstrip("/"); self.h={"X-Api-Key": key}; self.http=http
     def all_movies(self) -> List[dict]:
-        progress("Step 2/5: Loading Radarr library…")
+        progress("Step 2/6: Loading Radarr library…")
         r = self.http.get(f"{self.base}/api/v3/movie", headers=self.h); r.raise_for_status()
         data = r.json(); progress(f"Radarr movies: {len(data)}"); return data
     def get_or_create_tag(self, label: str) -> int:
@@ -129,7 +135,7 @@ class Sonarr:
     def __init__(self, base: str, key: str, http: Http):
         self.base = base.rstrip("/"); self.h={"X-Api-Key": key}; self.http=http
     def all_series(self) -> List[dict]:
-        progress("Step 3/5: Loading Sonarr library…")
+        progress("Step 3/6: Loading Sonarr library…")
         r = self.http.get(f"{self.base}/api/v3/series", headers=self.h); r.raise_for_status()
         data = r.json(); progress(f"Sonarr series: {len(data)}"); return data
     def get_or_create_tag(self, label: str) -> int:
@@ -145,7 +151,7 @@ class Sonarr:
 
 # ---------- mapping helpers ----------
 def build_radarr_maps(movies: List[dict]):
-    progress("Step 4/5: Building Radarr ID maps…")
+    progress("Step 4/6: Building Radarr ID maps…")
     tmdb_to_id, ty_to_id = {}, {}
     for m in movies:
         mid = m.get("id"); tmdb = m.get("tmdbId"); title=(m.get("title") or "").strip().lower(); year=m.get("year")
@@ -155,7 +161,7 @@ def build_radarr_maps(movies: List[dict]):
     return tmdb_to_id, ty_to_id
 
 def build_sonarr_maps(series: List[dict]):
-    progress("Step 4b/5: Building Sonarr ID maps…")
+    progress("Step 5/6: Building Sonarr ID maps…")
     tvdb_to_id, title_to_id = {}, {}
     for s in series:
         sid=s.get("id"); tvdb=s.get("tvdbId"); title=(s.get("title") or "").strip().lower()
@@ -173,12 +179,12 @@ def write_csv(path: str, rows: List[dict], headers: List[str]):
 
 # ---------- main ----------
 def main():
-    ap = argparse.ArgumentParser(description="Ombi→*arr tag backfill (no status filtering).")
+    ap = argparse.ArgumentParser(description="Ombi→*arr tag backfill (no status filtering) with unmatched CSVs.")
     ap.add_argument("--write", choices=["radarr","sonarr"], action="append",
                     help="Apply tags to this service (can repeat). Omit for preview only.")
     ap.add_argument("--apply-tags", choices=["add","replace","remove"], default="add",
                     help="Tag apply mode (default add).")
-    ap.add_argument("--outdir", default=".", help="Where to write CSV previews.")
+    ap.add_argument("--outdir", default=".", help="Where to write CSV previews/unmatched.")
     ap.add_argument("--timeout", type=int, default=15)
     ap.add_argument("--retries", type=int, default=3)
     ap.add_argument("--backoff", type=float, default=1.5)
@@ -188,7 +194,7 @@ def main():
     req = ["OMBI_URL","OMBI_API_KEY","RADARR_URL","RADARR_API_KEY","SONARR_URL","SONARR_API_KEY"]
     missing=[k for k in req if not os.getenv(k)]
     if missing:
-        progress(f"Missing env vars: {', '.join(missing)}"); sys.exit(2)
+        progress(f"[FATAL] Missing env vars: {', '.join(missing)}"); sys.exit(2)
 
     http = Http(timeout=args.timeout, max_retries=args.retries, backoff=args.backoff)
 
@@ -207,35 +213,54 @@ def main():
         son_series = son.all_series()
         tvdb_to_series, title_to_series = build_sonarr_maps(son_series)
 
-        # Previews (tag = EXACT requester)
-        progress("Step 5/5: Building previews…")
-        rad_rows=[]; unmatched_r=0
+        # Build previews + unmatched (tag = EXACT requester)
+        progress("Step 6/6: Building previews & unmatched…")
+        rad_rows=[]; rad_unmatched=[]
         for i,reqd in enumerate(movies,1):
             if i % 100 == 0: progress(f"… processed {i}/{len(movies)} movie requests")
             title=(reqd.get("title") or "").strip(); year=reqd.get("year"); tmdb=reqd.get("tmdbId")
             mid=None
             if isinstance(tmdb,int) and tmdb in tmdb_to_movie: mid=tmdb_to_movie[tmdb]
             elif title and isinstance(year,int): mid=ty_to_movie.get((title.lower(),year))
-            if mid is None: unmatched_r += 1
-            rad_rows.append({"requester": reqd.get("requester") or "",
-                             "tmdbId": tmdb if isinstance(tmdb,int) else "",
-                             "radarrId": mid if isinstance(mid,int) else "",
-                             "title": title,
-                             "proposedTag": reqd.get("requester") or ""})
+            if mid is None:
+                rad_unmatched.append({
+                    "requester": reqd.get("requester") or "",
+                    "tmdbId": tmdb if isinstance(tmdb,int) else "",
+                    "title": title,
+                    "year": year if isinstance(year,int) else "",
+                    "note": "No Radarr match by tmdbId or (title,year)"
+                })
+            else:
+                rad_rows.append({
+                    "requester": reqd.get("requester") or "",
+                    "tmdbId": tmdb if isinstance(tmdb,int) else "",
+                    "radarrId": mid,
+                    "title": title,
+                    "proposedTag": reqd.get("requester") or ""
+                })
 
-        son_rows=[]; unmatched_s=0
+        son_rows=[]; son_unmatched=[]
         for i,reqd in enumerate(shows,1):
             if i % 100 == 0: progress(f"… processed {i}/{len(shows)} show requests")
             title=(reqd.get("title") or "").strip(); tvdb=reqd.get("tvdbId")
             sid=None
             if isinstance(tvdb,int) and tvdb in tvdb_to_series: sid=tvdb_to_series[tvdb]
             elif title: sid=title_to_series.get(title.lower())
-            if sid is None: unmatched_s += 1
-            son_rows.append({"requester": reqd.get("requester") or "",
-                             "tvdbId": tvdb if isinstance(tvdb,int) else "",
-                             "sonarrId": sid if isinstance(sid,int) else "",
-                             "title": title,
-                             "proposedTag": reqd.get("requester") or ""})
+            if sid is None:
+                son_unmatched.append({
+                    "requester": reqd.get("requester") or "",
+                    "tvdbId": tvdb if isinstance(tvdb,int) else "",
+                    "title": title,
+                    "note": "No Sonarr match by tvdbId or title"
+                })
+            else:
+                son_rows.append({
+                    "requester": reqd.get("requester") or "",
+                    "tvdbId": tvdb if isinstance(tvdb,int) else "",
+                    "sonarrId": sid,
+                    "title": title,
+                    "proposedTag": reqd.get("requester") or ""
+                })
 
         # write CSVs
         outdir = args.outdir.rstrip("/"); os.makedirs(outdir, exist_ok=True)
@@ -243,7 +268,12 @@ def main():
                   headers=["requester","tmdbId","radarrId","title","proposedTag"])
         write_csv(f"{outdir}/sonarr_preview.csv", son_rows,
                   headers=["requester","tvdbId","sonarrId","title","proposedTag"])
-        progress(f"Preview complete. Unmatched: Radarr={unmatched_r}, Sonarr={unmatched_s}")
+        write_csv(f"{outdir}/radarr_unmatched.csv", rad_unmatched,
+                  headers=["requester","tmdbId","title","year","note"])
+        write_csv(f"{outdir}/sonarr_unmatched.csv", son_unmatched,
+                  headers=["requester","tvdbId","title","note"])
+
+        progress(f"Preview complete. Unmatched: Radarr={len(rad_unmatched)}, Sonarr={len(son_unmatched)}")
 
         # apply if requested
         writes=set(args.write or [])
@@ -252,7 +282,7 @@ def main():
             tag_to_ids: Dict[str,List[int]]={}
             for row in rad_rows:
                 label=row["proposedTag"]; mid=row.get("radarrId")
-                if label and (isinstance(mid,int) or (isinstance(mid,str) and str(mid).isdigit())):
+                if label and isinstance(mid,int):
                     tag_to_ids.setdefault(label,[]).append(int(mid))
             for label, ids in tag_to_ids.items():
                 try:
@@ -267,7 +297,7 @@ def main():
             tag_to_ids: Dict[str,List[int]]={}
             for row in son_rows:
                 label=row["proposedTag"]; sid=row.get("sonarrId")
-                if label and (isinstance(sid,int) or (isinstance(sid,str) and str(sid).isdigit())):
+                if label and isinstance(sid,int):
                     tag_to_ids.setdefault(label,[]).append(int(sid))
             for label, ids in tag_to_ids.items():
                 try:
